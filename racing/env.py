@@ -168,6 +168,7 @@ class RetroRacerEnv(gym.Env):
         self._clock = None
         self._font = None
         self.opponents = []  # list of (pos, heading, lap_progress) for race mode
+        self._delay_flip = False  # when True, render() skips display.flip()
 
         self._rng = np.random.default_rng(seed)
 
@@ -553,7 +554,8 @@ class RetroRacerEnv(gym.Env):
                     race_text = self._font.render(race_hud, True, (100, 160, 240))
                     scr.blit(race_text, (14, 36))
 
-        pygame.display.flip()
+        if not self._delay_flip:
+            pygame.display.flip()
         self._clock.tick(self.metadata["render_fps"])
 
         if self.render_mode == "rgb_array":

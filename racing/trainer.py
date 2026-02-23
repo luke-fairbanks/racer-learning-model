@@ -265,14 +265,19 @@ def fine_tune(base_model_path, total_steps=200_000, track_file=None, track_name=
 # -------------------------
 def watch(model_path="retro_racer_sac.zip", episodes=5, track_file=None):
     import pygame
+    import torch
+    import math
     from stable_baselines3 import SAC
 
     env = RetroRacerEnv(render_mode="human", seed=0, track_seed=123, track_file=track_file)
     model = SAC.load(model_path)
 
+    show_viz = True  # toggle with V key
+    env._delay_flip = True  # we'll flip after drawing viz
+
     for ep in range(episodes):
         obs, info = env.reset()
-        env.render()  # force pygame init before event loop
+        env.render()
         ep_r = 0.0
         done = False
         while not done:
@@ -280,15 +285,146 @@ def watch(model_path="retro_racer_sac.zip", episodes=5, track_file=None):
                 if event.type == pygame.QUIT:
                     done = True
                     break
+                if event.type == pygame.KEYDOWN and event.key == pygame.K_v:
+                    show_viz = not show_viz
 
             action, _ = model.predict(obs, deterministic=True)
+
+            # Get Q-value from critic before stepping
+            q_value = None
+            if show_viz:
+                try:
+                    obs_t = torch.FloatTensor(obs).unsqueeze(0).to(model.device)
+                    act_t = torch.FloatTensor(action).unsqueeze(0).to(model.device)
+                    with torch.no_grad():
+                        q1, q2 = model.critic(obs_t, act_t)
+                        q_value = float(torch.min(q1, q2).item())
+                except Exception:
+                    q_value = None
+
             obs, reward, terminated, truncated, info = env.step(action)
             ep_r += reward
+
+            if show_viz and env._pygame_inited:
+                _draw_ai_viz(env, action, obs, q_value, model)
+            pygame.display.flip()
+
             done = bool(terminated or truncated)
 
         print(f"  [watch] episode {ep+1}/{episodes} total reward: {ep_r:.2f}")
 
     env.close()
+
+
+def _draw_ai_viz(env, action, obs, q_value, model):
+    """Draw AI decision visualization overlays."""
+    import pygame
+    import math
+
+    scr = env._screen
+    font = env._font
+    zoom = 0.72
+    cam = env.pos.copy()
+    N = len(env.track.pts)
+
+    # --- 1. Lookahead rays (what the AI sees ahead) ---
+    from racing.env import find_nearest_track_point
+    i, proj, t, dist, s, tangent = find_nearest_track_point(env.track, env.pos)
+
+    for k in range(1, env.lookahead + 1):
+        idx = (i + k * 3) % N
+        pt = env.track.pts[idx]
+        pt_scr = env._world_to_screen(pt, cam, zoom)
+        car_scr = env._world_to_screen(env.pos, cam, zoom)
+
+        # Color by curvature from observation (curvature values are at indices 4+2*lookahead+k-1)
+        curv_idx = 4 + 2 * env.lookahead + (k - 1)
+        if curv_idx < len(obs):
+            curv = abs(obs[curv_idx])  # 0 = straight, ~1 = sharp
+            # Green (straight) → Yellow → Red (sharp)
+            r = min(255, int(curv * 3 * 255))
+            g = max(0, 255 - int(curv * 2 * 255))
+            color = (r, g, 40)
+        else:
+            color = (100, 200, 100)
+
+        # Draw ray line
+        pygame.draw.line(scr, (*color, ), car_scr, pt_scr, 1)
+        # Draw point dot
+        pygame.draw.circle(scr, color, pt_scr, 4)
+
+    # --- 2. Predicted path (simulate forward with current action) ---
+    sim_pos = env.pos.copy()
+    sim_vel = env.vel
+    sim_heading = env.heading
+    dt = env.dt
+
+    pred_points = []
+    for step in range(15):
+        forward = np.array([math.cos(sim_heading), math.sin(sim_heading)], dtype=np.float32)
+        sim_pos = sim_pos + forward * float(sim_vel * dt)
+
+        steer = float(action[0])
+        speed_factor = min(sim_vel / (env.max_speed * env.steer_speed_scale + 1e-8), 1.0)
+        speed_pct = sim_vel / (env.max_speed + 1e-8)
+        grip_factor = 1.0 / (1.0 + 2.5 * speed_pct * speed_pct)
+        turn_rate = steer * env.steer_rate * (0.25 + 0.75 * speed_factor) * grip_factor
+        sim_heading += turn_rate * dt
+
+        pt_scr = env._world_to_screen(sim_pos, cam, zoom)
+        pred_points.append(pt_scr)
+
+    # Draw predicted path as dots
+    for pi, pt in enumerate(pred_points):
+        alpha = max(40, 200 - pi * 12)
+        pygame.draw.circle(scr, (0, 220, 230), pt, 2)
+
+    # --- 3. Steer/Throttle gauges (bottom-left) ---
+    gauge_x = 14
+    gauge_y = scr.get_height() - 60
+
+    steer_val = float(action[0])
+    throttle_val = float(action[1])
+
+    # Steer gauge
+    pygame.draw.rect(scr, (40, 40, 55), (gauge_x, gauge_y, 120, 12))
+    center_x = gauge_x + 60
+    bar_w = int(steer_val * 55)
+    if bar_w > 0:
+        pygame.draw.rect(scr, (255, 180, 40), (center_x, gauge_y + 1, bar_w, 10))
+    elif bar_w < 0:
+        pygame.draw.rect(scr, (255, 180, 40), (center_x + bar_w, gauge_y + 1, -bar_w, 10))
+    pygame.draw.line(scr, (200, 200, 220), (center_x, gauge_y), (center_x, gauge_y + 12), 1)
+    steer_label = font.render(f"STEER {steer_val:+.2f}", True, (160, 170, 190))
+    scr.blit(steer_label, (gauge_x + 130, gauge_y - 1))
+
+    # Throttle gauge
+    gauge_y += 18
+    pygame.draw.rect(scr, (40, 40, 55), (gauge_x, gauge_y, 120, 12))
+    t_bar_w = int(throttle_val * 120)
+    t_color = (60, 200, 80) if throttle_val > 0.3 else (200, 80, 60)
+    pygame.draw.rect(scr, t_color, (gauge_x, gauge_y + 1, max(0, t_bar_w), 10))
+    throttle_label = font.render(f"THRTL {throttle_val:.2f}", True, (160, 170, 190))
+    scr.blit(throttle_label, (gauge_x + 130, gauge_y - 1))
+
+    # --- 4. Q-value confidence meter (bottom-right) ---
+    if q_value is not None:
+        q_x = scr.get_width() - 180
+        q_y = scr.get_height() - 42
+
+        # Normalize Q to a 0-1 bar (typical range: -10 to +50)
+        q_norm = max(0.0, min(1.0, (q_value + 10) / 60))
+
+        pygame.draw.rect(scr, (40, 40, 55), (q_x, q_y, 160, 12))
+        # Color: red (low confidence) → green (high confidence)
+        q_r = max(0, int(255 * (1 - q_norm)))
+        q_g = min(255, int(255 * q_norm))
+        q_bar_w = int(q_norm * 160)
+        pygame.draw.rect(scr, (q_r, q_g, 40), (q_x, q_y + 1, max(0, q_bar_w), 10))
+
+        q_label = font.render(f"Q: {q_value:+.1f}", True, (160, 170, 190))
+        scr.blit(q_label, (q_x, q_y - 18))
+
 
 
 # -------------------------
