@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+
+# Training artifacts (track-specific models are personal)
+models/*
+!models/_base/
+!models/monaco/
+
+# Keep tracks
+tracks/*
+!tracks/monaco.json
+
+# Old monolithic file
+retro_racer_sac.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+nohup.out
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
