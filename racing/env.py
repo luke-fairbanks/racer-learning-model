@@ -325,30 +325,31 @@ class RetroRacerEnv(gym.Env):
         else:
             self.offtrack_counter += 1
 
-        # Reward: rebalanced for high-speed braking physics
+        # Reward: balanced for speed + braking
         speed_norm = self.vel / self.max_speed
         cte_norm = abs(cte) / self.track.half_width
         heading_norm = abs(heading_err) / math.pi
 
         reward = 0.0
         reward += 1.2 * (ds / (self.max_speed * self.dt + 1e-8))  # progress
-        reward += 0.15 * speed_norm                                # encourage speed
+        reward += 0.3 * speed_norm                                 # strong speed bonus
         reward -= 0.5 * cte_norm                                   # stay centered
         reward -= 0.4 * heading_norm                                # face the right way
         reward -= 0.1 * (steer * steer)                            # smooth steering
 
         # Idle penalty: sitting still is NOT an option
         if speed_norm < 0.15:
-            reward -= 0.3  # constant drain for going too slow
+            reward -= 0.3
 
-        # Curvature-aware speed penalty: HARSH punishment for going fast into turns
+        # Curvature penalty: only for real turns, scaled by curvature²
+        # Mild bends barely register, sharp hairpins punish hard
         upcoming_curv = getattr(self, '_upcoming_curvature', 0.0)
-        curv_norm = min(upcoming_curv / 0.4, 1.0)  # 0=straight, 1=very sharp
-        if curv_norm > 0.1:
-            reward -= 1.0 * curv_norm * speed_norm * speed_norm  # quadratic
+        curv_norm = min(upcoming_curv / 0.4, 1.0)
+        if curv_norm > 0.25:  # only real turns, not mild bends
+            reward -= 0.8 * curv_norm * curv_norm * speed_norm  # curv² × speed
 
-        # Reward braking before sharp turns (teaches the AI to use negative throttle)
-        if curv_norm > 0.2 and throttle < -0.1:
+        # Reward braking before sharp turns
+        if curv_norm > 0.3 and throttle < -0.1:
             reward += 0.3 * curv_norm * abs(throttle)
 
         terminated = False
