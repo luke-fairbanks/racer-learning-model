@@ -482,13 +482,74 @@ def main():
             load = track_file
         track_editor(load_file=load)
 
+    elif mode == "train_base":
+        steps = 2_000_000
+        for arg in sys.argv[2:]:
+            if arg.startswith("--steps"):
+                continue
+            if arg.startswith("--"):
+                continue
+            try:
+                s = arg.lower()
+                if s.endswith("m"):
+                    steps = int(float(s[:-1]) * 1_000_000)
+                elif s.endswith("k"):
+                    steps = int(float(s[:-1]) * 1_000)
+                else:
+                    steps = int(s)
+                break
+            except ValueError:
+                continue
+        # Also check --steps flag
+        for i, arg in enumerate(sys.argv):
+            if arg == "--steps" and i + 1 < len(sys.argv):
+                s = sys.argv[i + 1].lower()
+                if s.endswith("m"):
+                    steps = int(float(s[:-1]) * 1_000_000)
+                elif s.endswith("k"):
+                    steps = int(float(s[:-1]) * 1_000)
+                else:
+                    steps = int(s)
+        train_base(total_steps=steps)
+
+    elif mode == "fine_tune":
+        steps = 200_000
+        base_path = None
+        for i, arg in enumerate(sys.argv):
+            if arg == "--steps" and i + 1 < len(sys.argv):
+                s = sys.argv[i + 1].lower()
+                if s.endswith("m"):
+                    steps = int(float(s[:-1]) * 1_000_000)
+                elif s.endswith("k"):
+                    steps = int(float(s[:-1]) * 1_000)
+                else:
+                    steps = int(s)
+            if arg == "--base" and i + 1 < len(sys.argv):
+                base_path = sys.argv[i + 1]
+
+        if base_path is None:
+            # Use latest base model
+            base_models = list_models("_base")
+            if base_models:
+                base_path = base_models[-1]["path"]
+                print(f"  Using latest base model: {base_path}")
+            else:
+                print(f"  {RED}No base models found. Train one first: python run.py train_base{RESET}")
+                return
+
+        fine_tune(base_model_path=base_path, total_steps=steps,
+                  track_file=track_file, track_name=track_name)
+
     else:
         print(f"  {BOLD}RetroRacer{RESET} — Usage:")
         print()
-        print(f"    python run.py              {DIM}# Interactive TUI{RESET}")
-        print(f"    python run.py human        {DIM}# Drive manually{RESET}")
-        print(f"    python run.py train [800k] {DIM}# Train AI{RESET}")
-        print(f"    python run.py watch        {DIM}# Watch trained agent{RESET}")
-        print(f"    python run.py edit         {DIM}# Track editor{RESET}")
+        print(f"    python run.py                    {DIM}# Interactive TUI{RESET}")
+        print(f"    python run.py human              {DIM}# Drive manually{RESET}")
+        print(f"    python run.py train [800k]       {DIM}# Train AI on track{RESET}")
+        print(f"    python run.py train_base [3m]    {DIM}# Train base model (random tracks){RESET}")
+        print(f"    python run.py fine_tune          {DIM}# Fine-tune base for a track{RESET}")
+        print(f"    python run.py watch              {DIM}# Watch trained agent{RESET}")
+        print(f"    python run.py edit               {DIM}# Track editor{RESET}")
         print()
-        print(f"  {DIM}Flags: --track tracks/file.json{RESET}")
+        print(f"  {DIM}Flags: --track tracks/file.json --steps 3m --base models/_base/model.zip{RESET}")
+

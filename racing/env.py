@@ -106,7 +106,7 @@ class RetroRacerEnv(gym.Env):
         track_seed=123,
         lookahead=6,
         dt=1/30,
-        max_steps=4000,
+        max_steps=2000,
         track_half_width=42.0,
         world_scale=1.0,
         track_file=None,
@@ -138,9 +138,9 @@ class RetroRacerEnv(gym.Env):
         self.prev_s = 0.0
         self.lap_progress = 0.0
 
-        # Action space: steer [-1,1], throttle [0,1]
+        # Action space: steer [-1,1], throttle [-1,1] (negative = brake)
         self.action_space = spaces.Box(
-            low=np.array([-1.0, 0.0], dtype=np.float32),
+            low=np.array([-1.0, -1.0], dtype=np.float32),
             high=np.array([1.0, 1.0], dtype=np.float32),
             dtype=np.float32,
         )
@@ -152,8 +152,8 @@ class RetroRacerEnv(gym.Env):
         )
 
         # Physics params
-        self.max_speed = 280.0
-        self.accel = 220.0          # peak acceleration (at low speed)
+        self.max_speed = 380.0
+        self.accel = 300.0          # peak acceleration (at low speed)
         self.brake_decel = 250.0    # braking force
         self.drag = 0.5             # aerodynamic drag coefficient
         self.engine_brake = 40.0    # deceleration when coasting (no throttle)
@@ -252,24 +252,27 @@ class RetroRacerEnv(gym.Env):
         steer = float(action[0])
         throttle = float(action[1])
         steer = clamp(steer, -1.0, 1.0)
-        throttle = clamp(throttle, 0.0, 1.0)
+        throttle = clamp(throttle, -1.0, 1.0)
 
         dt = self.dt
+        is_braking = throttle < -0.05
 
         # Non-linear acceleration: strong at low speed, weaker at high speed
-        # Simulates gear ratios / power curve
         speed_ratio = self.vel / (self.max_speed + 1e-8)
-        accel_curve = 1.0 - 0.5 * speed_ratio  # 100% at 0 speed, 50% at max
+        accel_curve = 1.0 - 0.5 * speed_ratio
 
         if throttle > 0.15:
             # Accelerating
             net_accel = throttle * self.accel * accel_curve - self.drag * self.vel * speed_ratio
+        elif throttle < -0.05:
+            # Active braking (DOWN key / negative throttle)
+            brake_force = abs(throttle) * self.brake_decel
+            net_accel = -(brake_force + self.drag * self.vel * speed_ratio)
         elif throttle < 0.05:
-            # Braking / coasting: engine braking + drag
-            brake_amount = 1.0 - throttle / 0.05  # 1.0 at 0 throttle, 0.0 at 0.05
+            # Coasting: engine braking + drag
             net_accel = -(self.engine_brake + self.drag * self.vel * speed_ratio)
         else:
-            # Light throttle: just maintaining / slight accel
+            # Light throttle
             net_accel = throttle * self.accel * accel_curve * 0.3 - self.drag * self.vel * speed_ratio
 
         self.vel += net_accel * dt
@@ -278,9 +281,16 @@ class RetroRacerEnv(gym.Env):
         speed_factor = clamp(self.vel / (self.max_speed * self.steer_speed_scale + 1e-8), 0.0, 1.0)
 
         # Understeer: steering becomes less effective at high speed
-        # At low speed you get full turning, at high speed the car won't turn as tight
         speed_pct = self.vel / (self.max_speed + 1e-8)
-        grip_factor = 1.0 / (1.0 + 2.5 * speed_pct * speed_pct)  # ~1.0 at 0, ~0.25 at max
+        grip_factor = 1.0 / (1.0 + 2.5 * speed_pct * speed_pct)
+
+        # Brake-turn lockup: braking + steering = loss of grip
+        # Simulates tire grip circle — can't brake and turn at full grip
+        if is_braking and abs(steer) > 0.2:
+            brake_intensity = abs(throttle)  # 0-1
+            steer_intensity = abs(steer)     # 0-1
+            lockup = brake_intensity * steer_intensity  # 0-1
+            grip_factor *= max(0.15, 1.0 - 0.8 * lockup)  # up to 80% grip loss
 
         turn_rate = steer * self.steer_rate * (0.25 + 0.75 * speed_factor) * grip_factor
         self.heading += turn_rate * dt
@@ -315,36 +325,44 @@ class RetroRacerEnv(gym.Env):
         else:
             self.offtrack_counter += 1
 
-        # Reward: rebalanced for high-speed understeer physics
+        # Reward: rebalanced for high-speed braking physics
         speed_norm = self.vel / self.max_speed
         cte_norm = abs(cte) / self.track.half_width
         heading_norm = abs(heading_err) / math.pi
 
         reward = 0.0
         reward += 1.2 * (ds / (self.max_speed * self.dt + 1e-8))  # progress
-        reward += 0.2 * speed_norm                                 # encourage speed
+        reward += 0.15 * speed_norm                                # encourage speed
         reward -= 0.5 * cte_norm                                   # stay centered
         reward -= 0.4 * heading_norm                                # face the right way
         reward -= 0.1 * (steer * steer)                            # smooth steering
 
-        # Curvature-aware speed penalty: punish going fast into sharp turns
+        # Idle penalty: sitting still is NOT an option
+        if speed_norm < 0.15:
+            reward -= 0.3  # constant drain for going too slow
+
+        # Curvature-aware speed penalty: HARSH punishment for going fast into turns
         upcoming_curv = getattr(self, '_upcoming_curvature', 0.0)
-        curv_norm = min(upcoming_curv / 0.5, 1.0)  # 0=straight, 1=very sharp
-        if curv_norm > 0.15:  # only penalize in actual turns
-            reward -= 0.3 * curv_norm * speed_norm  # fast + curvy = bad
+        curv_norm = min(upcoming_curv / 0.4, 1.0)  # 0=straight, 1=very sharp
+        if curv_norm > 0.1:
+            reward -= 1.0 * curv_norm * speed_norm * speed_norm  # quadratic
+
+        # Reward braking before sharp turns (teaches the AI to use negative throttle)
+        if curv_norm > 0.2 and throttle < -0.1:
+            reward += 0.3 * curv_norm * abs(throttle)
 
         terminated = False
         truncated = False
 
         if self.offtrack_counter > self.offtrack_grace:
             terminated = True
-            reward -= 5.0
+            reward -= 10.0  # crash penalty (not so harsh that sitting still beats driving)
 
         if self.step_count >= self.max_steps:
             truncated = True
 
         if self.lap_progress >= self.track.total:
-            reward += 30.0  # big lap bonus (scaled up for harder physics)
+            reward += 50.0  # big lap bonus
             terminated = True
 
         obs = self._get_obs()

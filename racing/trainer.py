@@ -92,9 +92,11 @@ def human_drive(track_file=None):
         if keys[pygame.K_RIGHT]:
             steer += 1.0
 
-        throttle = 0.0  # no input = not moving
+        throttle = 0.0  # no input = coasting
         if keys[pygame.K_UP]:
             throttle = 1.0
+        if keys[pygame.K_DOWN]:
+            throttle = -1.0
 
         action = np.array([steer, throttle], dtype=np.float32)
         obs, reward, terminated, truncated, info = env.step(action)
@@ -492,6 +494,8 @@ def race(model_path, track_file=None):
             throttle = 0.0
             if keys[pygame.K_UP]:
                 throttle = 1.0
+            if keys[pygame.K_DOWN]:
+                throttle = -1.0
 
             human_action = np.array([steer, throttle], dtype=np.float32)
             ai_action, _ = model.predict(ai_obs, deterministic=True)
